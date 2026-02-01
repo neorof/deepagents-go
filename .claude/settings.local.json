@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(env)",
+      "Bash(go run:*)",
+      "Bash(make build:*)",
+      "Bash(./bin/deepagents:*)",
+      "Bash(git rm:*)",
+      "Bash(ls:*)",
+      "Bash(go tool cover:*)",
+      "Bash(gofmt:*)",
+      "Bash(go mod tidy:*)"
+    ]
+  }
+}

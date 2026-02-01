@@ -1,0 +1,38 @@
+# 构建产物
+/bin/
+/deepagents
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试和覆盖率
+*.test
+*.out
+coverage.out
+coverage.html
+full_coverage.out
+llm_coverage.out
+
+# 工作目录
+/workspace/
+/workspace_*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.log
+*.tmp
+
+# 沙箱目录
+/sandbox/

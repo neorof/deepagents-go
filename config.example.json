@@ -1,0 +1,12 @@
+{
+  "api_key": "",
+  "model": "claude-3-5-sonnet-20241022",
+  "work_dir": "./workspace",
+  "max_iterations": 25,
+  "max_tokens": 4096,
+  "temperature": 0.7,
+  "log_level": "info",
+  "log_file": "",
+  "log_format": "text",
+  "interactive": false
+}
