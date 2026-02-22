@@ -6,6 +6,7 @@ import (
 
 	"github.com/zhoucx/deepagents-go/pkg/agent"
 	"github.com/zhoucx/deepagents-go/pkg/backend"
+	"github.com/zhoucx/deepagents-go/pkg/internal/stringutil"
 	"github.com/zhoucx/deepagents-go/pkg/llm"
 	"github.com/zhoucx/deepagents-go/pkg/tools"
 )
@@ -64,7 +65,7 @@ func (m *FilesystemMiddleware) AfterTool(ctx context.Context, result *llm.ToolRe
 
 // createPreview 创建内容预览
 func createPreview(content string, headLines, tailLines int) string {
-	lines := splitLines(content)
+	lines := stringutil.SplitLines(content)
 	if len(lines) <= headLines+tailLines {
 		return content
 	}
@@ -84,20 +85,4 @@ func createPreview(content string, headLines, tailLines int) string {
 	}
 
 	return preview
-}
-
-// splitLines 分割行
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
 }
