@@ -60,9 +60,9 @@ func TestIndicator_Update(t *testing.T) {
 	indicator.writer = &buf
 
 	indicator.Start("initial")
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	indicator.Update("updated")
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	indicator.Stop()
 
 	output := buf.String()

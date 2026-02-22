@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Deep Agents Go - Skills Middleware 示例 ===")
+	fmt.Println("=== Deep Agents Go - Skills 懒加载示例 ===")
 
 	// 检查 API Key
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
@@ -33,25 +33,26 @@ func main() {
 	// 创建中间件
 	fsMiddleware := middleware.NewFilesystemMiddleware(stateBackend, toolRegistry)
 
-	// 创建技能中间件（渐进式披露模式）
-	skillsMiddleware := middleware.NewSkillsMiddleware(&middleware.SkillsConfig{
-		DisclosureMode: "progressive", // 渐进式披露
-	})
+	// 创建技能中间件（懒加载模式）
+	// - 在 system prompt 中只显示轻量技能列表（名称+描述）
+	// - 模型通过 use_skill 工具按需加载完整技能内容
+	skillsMiddleware := middleware.NewSkillsMiddleware(toolRegistry)
 
-	// 加载技能文件
-	if err := skillsMiddleware.LoadFromFile("../../SKILLS.md"); err != nil {
-		log.Printf("警告: 无法加载 SKILLS.md: %v\n", err)
-	} else {
-		skills := skillsMiddleware.GetSkills()
-		fmt.Printf("✅ 已加载 %d 个技能\n\n", len(skills))
-
-		// 显示已加载的技能
-		fmt.Println("已加载的技能:")
-		for i, skill := range skills {
-			fmt.Printf("%d. %s - %s\n", i+1, skill.Name, skill.Description)
-		}
-		fmt.Println()
+	// 从目录加载技能（Claude Code 格式）
+	// 目录结构：skills/<skill-name>/SKILL.md
+	if err := skillsMiddleware.LoadFromDirectory("skills"); err != nil {
+		log.Printf("警告: 无法加载技能目录: %v\n", err)
 	}
+
+	skills := skillsMiddleware.GetSkills()
+	fmt.Printf("已加载 %d 个技能\n\n", len(skills))
+
+	// 显示已加载的技能（轻量列表）
+	fmt.Println("可用技能:")
+	for i, skill := range skills {
+		fmt.Printf("%d. %s - %s\n", i+1, skill.Name, skill.Description)
+	}
+	fmt.Println()
 
 	// 创建 Agent
 	config := &agent.Config{
@@ -63,11 +64,12 @@ func main() {
 		},
 		SystemPrompt: "你是一个有用的 AI 助手，可以帮助用户完成各种任务。",
 	}
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 
-	// 示例 1: 文件操作任务（应该触发"文件操作"技能）
+	// 示例 1: 文件操作任务
 	fmt.Println("=== 示例 1: 文件操作任务 ===")
 	fmt.Println("任务: 创建一个测试文件")
+	fmt.Println("说明: 模型会根据需要决定是否调用 use_skill 获取详细知识")
 
 	output1, err := executor.Invoke(context.Background(), &agent.InvokeInput{
 		Messages: []llm.Message{
@@ -88,15 +90,16 @@ func main() {
 		fmt.Printf("消息数: %d\n\n", len(output1.Messages))
 	}
 
-	// 示例 2: 搜索任务（应该触发"文件搜索"技能）
-	fmt.Println("=== 示例 2: 文件搜索任务 ===")
-	fmt.Println("任务: 搜索文件")
+	// 示例 2: 询问技能详情（会触发 Skill 工具调用）
+	fmt.Println("=== 示例 2: 询问技能详情 ===")
+	fmt.Println("任务: 询问文件操作技能的详细信息")
+	fmt.Println("说明: 模型应该调用 Skill 工具获取完整技能内容")
 
 	output2, err := executor.Invoke(context.Background(), &agent.InvokeInput{
 		Messages: []llm.Message{
 			{
 				Role:    llm.RoleUser,
-				Content: "请列出根目录下的所有文件",
+				Content: "请告诉我 'file-operations' 技能的详细信息和最佳实践",
 			},
 		},
 	})
@@ -111,53 +114,15 @@ func main() {
 		fmt.Printf("消息数: %d\n\n", len(output2.Messages))
 	}
 
-	// 示例 3: 切换到"全部显示"模式
-	fmt.Println("=== 示例 3: 全部显示模式 ===")
-	skillsMiddleware.SetDisclosureMode("all")
-	fmt.Println("已切换到全部显示模式，所有技能都会被注入到系统提示中")
-
-	output3, err := executor.Invoke(context.Background(), &agent.InvokeInput{
-		Messages: []llm.Message{
-			{
-				Role:    llm.RoleUser,
-				Content: "你有哪些技能？",
-			},
-		},
-	})
-
-	if err != nil {
-		log.Printf("错误: %v\n", err)
-	} else {
-		if len(output3.Messages) > 0 {
-			lastMsg := output3.Messages[len(output3.Messages)-1]
-			fmt.Printf("\n响应: %s\n\n", lastMsg.Content)
+	// 检查技能加载状态
+	fmt.Println("=== 技能加载状态 ===")
+	for _, skill := range skillsMiddleware.GetSkills() {
+		loaded := "未加载"
+		if skillsMiddleware.IsSkillLoaded(skill.Name) {
+			loaded = "已加载"
 		}
+		fmt.Printf("- %s: %s\n", skill.Name, loaded)
 	}
 
-	// 示例 4: 手动模式
-	fmt.Println("=== 示例 4: 手动模式 ===")
-	skillsMiddleware.SetDisclosureMode("manual")
-	skillsMiddleware.EnableSkill("文件操作")
-	skillsMiddleware.EnableSkill("任务规划")
-	fmt.Println("已切换到手动模式，只启用了'文件操作'和'任务规划'技能")
-
-	output4, err := executor.Invoke(context.Background(), &agent.InvokeInput{
-		Messages: []llm.Message{
-			{
-				Role:    llm.RoleUser,
-				Content: "你现在可以使用哪些技能？",
-			},
-		},
-	})
-
-	if err != nil {
-		log.Printf("错误: %v\n", err)
-	} else {
-		if len(output4.Messages) > 0 {
-			lastMsg := output4.Messages[len(output4.Messages)-1]
-			fmt.Printf("\n响应: %s\n\n", lastMsg.Content)
-		}
-	}
-
-	fmt.Println("=== 示例完成 ===")
+	fmt.Println("\n=== 示例完成 ===")
 }

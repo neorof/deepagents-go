@@ -2,10 +2,13 @@ package middleware
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/zhoucx/deepagents-go/pkg/agent"
 	"github.com/zhoucx/deepagents-go/pkg/llm"
+	"github.com/zhoucx/deepagents-go/pkg/tools"
 )
 
 func TestNewSkillsMiddleware(t *testing.T) {
@@ -13,348 +16,194 @@ func TestNewSkillsMiddleware(t *testing.T) {
 	if m == nil {
 		t.Fatal("Expected middleware to be created")
 	}
-
-	if m.disclosureMode != "progressive" {
-		t.Errorf("Expected default disclosure mode to be 'progressive', got %s", m.disclosureMode)
+	if len(m.skills) != 0 {
+		t.Error("Expected empty skills list")
 	}
 }
 
-func TestSkillsMiddleware_LoadFromFile(t *testing.T) {
-	m := NewSkillsMiddleware(nil)
-
-	// 测试加载不存在的文件
-	err := m.LoadFromFile("nonexistent.md")
-	if err == nil {
-		t.Error("Expected error when loading nonexistent file")
+func TestNewSkillsMiddleware_WithRegistry(t *testing.T) {
+	registry := tools.NewRegistry()
+	m := NewSkillsMiddleware(registry)
+	if m == nil {
+		t.Fatal("Expected middleware to be created")
 	}
 
-	// 测试加载 SKILLS.md
-	err = m.LoadFromFile("../../SKILLS.md")
+	tool, ok := registry.Get("Skill")
+	if !ok {
+		t.Error("Expected Skill tool to be registered")
+	}
+	if tool.Name() != "Skill" {
+		t.Errorf("Expected tool name 'Skill', got '%s'", tool.Name())
+	}
+}
+
+func TestSkillsMiddleware_ParseSkill(t *testing.T) {
+	m := NewSkillsMiddleware(nil)
+	content := `---
+name: git-workflow
+description: Git 工作流最佳实践
+allowed-tools:
+  - Bash
+  - Read
+---
+
+# Git 工作流
+
+## 分支命名规范
+- feature/xxx - 新功能
+`
+
+	skill, err := m.parseSkill(content, "/path/to/skill")
 	if err != nil {
-		t.Fatalf("Failed to load SKILLS.md: %v", err)
+		t.Fatalf("Failed to parse skill: %v", err)
 	}
-
-	skills := m.GetSkills()
-	if len(skills) == 0 {
-		t.Error("Expected skills to be loaded")
+	if skill.Name != "git-workflow" {
+		t.Errorf("Expected name 'git-workflow', got '%s'", skill.Name)
 	}
-
-	// 验证技能内容
-	fileOpSkill := m.GetSkillByName("文件操作")
-	if fileOpSkill == nil {
-		t.Error("Expected '文件操作' skill to be loaded")
-	} else {
-		if fileOpSkill.Description == "" {
-			t.Error("Expected skill description to be set")
-		}
-		if len(fileOpSkill.Tools) == 0 {
-			t.Error("Expected skill tools to be extracted")
-		}
+	if skill.Description == "" {
+		t.Error("Expected description to be set")
+	}
+	if len(skill.AllowedTools) != 2 {
+		t.Errorf("Expected 2 allowed tools, got %d", len(skill.AllowedTools))
+	}
+	if skill.BasePath != "/path/to/skill" {
+		t.Errorf("Expected base path '/path/to/skill', got '%s'", skill.BasePath)
 	}
 }
 
-func TestSkillsMiddleware_GetSkillByName(t *testing.T) {
+func TestSkillsMiddleware_ParseSkill_Errors(t *testing.T) {
 	m := NewSkillsMiddleware(nil)
-	m.skills = []Skill{
-		{Name: "测试技能", Description: "测试描述"},
+
+	// Missing frontmatter
+	_, err := m.parseSkill("# No Frontmatter", "")
+	if err == nil {
+		t.Error("Expected error for missing frontmatter")
 	}
 
-	skill := m.GetSkillByName("测试技能")
+	// Missing name
+	_, err = m.parseSkill("---\ndescription: test\n---\n# Content", "")
+	if err == nil {
+		t.Error("Expected error for missing name")
+	}
+
+	// Missing description
+	_, err = m.parseSkill("---\nname: test\n---\n# Content", "")
+	if err == nil {
+		t.Error("Expected error for missing description")
+	}
+}
+
+func TestSkillsMiddleware_AddAndGetSkill(t *testing.T) {
+	m := NewSkillsMiddleware(nil)
+	m.AddSkill(Skill{Name: "test-skill", Description: "A test skill"})
+
+	if len(m.skills) != 1 {
+		t.Errorf("Expected 1 skill, got %d", len(m.skills))
+	}
+
+	skill := m.GetSkillByName("test-skill")
 	if skill == nil {
 		t.Error("Expected to find skill")
 	}
 
-	skill = m.GetSkillByName("不存在的技能")
+	skill = m.GetSkillByName("nonexistent")
 	if skill != nil {
 		t.Error("Expected nil for nonexistent skill")
 	}
 }
 
-func TestSkillsMiddleware_EnableDisableSkill(t *testing.T) {
+func TestSkillsMiddleware_IsSkillLoaded(t *testing.T) {
 	m := NewSkillsMiddleware(nil)
-
-	// 测试启用技能
-	m.EnableSkill("测试技能")
-	if !m.IsSkillEnabled("测试技能") {
-		t.Error("Expected skill to be enabled")
+	if m.IsSkillLoaded("test") {
+		t.Error("Expected skill to not be loaded initially")
 	}
-
-	// 测试禁用技能
-	m.DisableSkill("测试技能")
-	if m.IsSkillEnabled("测试技能") {
-		t.Error("Expected skill to be disabled")
+	m.loadedSkills["test"] = true
+	if !m.IsSkillLoaded("test") {
+		t.Error("Expected skill to be loaded")
 	}
 }
 
-func TestSkillsMiddleware_SetDisclosureMode(t *testing.T) {
+func TestSkillsMiddleware_BeforeModel(t *testing.T) {
 	m := NewSkillsMiddleware(nil)
 
-	m.SetDisclosureMode("all")
-	if m.GetDisclosureMode() != "all" {
-		t.Errorf("Expected disclosure mode to be 'all', got %s", m.GetDisclosureMode())
+	// No skills - prompt unchanged
+	req := &llm.ModelRequest{SystemPrompt: "original"}
+	m.BeforeModel(context.Background(), req)
+	if req.SystemPrompt != "original" {
+		t.Error("Expected prompt unchanged with no skills")
 	}
 
-	m.SetDisclosureMode("manual")
-	if m.GetDisclosureMode() != "manual" {
-		t.Errorf("Expected disclosure mode to be 'manual', got %s", m.GetDisclosureMode())
-	}
-}
-
-func TestSkillsMiddleware_BeforeModel_NoSkills(t *testing.T) {
-	m := NewSkillsMiddleware(nil)
-
-	req := &llm.ModelRequest{
-		Messages:     []llm.Message{{Role: llm.RoleUser, Content: "测试"}},
-		SystemPrompt: "原始提示",
-	}
-
-	err := m.BeforeModel(context.Background(), req)
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
-	}
-
-	// 没有技能时，系统提示不应该改变
-	if req.SystemPrompt != "原始提示" {
-		t.Error("Expected system prompt to remain unchanged")
-	}
-}
-
-func TestSkillsMiddleware_BeforeModel_AllMode(t *testing.T) {
-	m := NewSkillsMiddleware(&SkillsConfig{DisclosureMode: "all"})
-	m.skills = []Skill{
-		{Name: "技能1", Description: "描述1", Tools: []string{"tool1"}},
-		{Name: "技能2", Description: "描述2", Tools: []string{"tool2"}},
-	}
-
-	req := &llm.ModelRequest{
-		Messages:     []llm.Message{{Role: llm.RoleUser, Content: "测试"}},
-		SystemPrompt: "",
-	}
-
-	err := m.BeforeModel(context.Background(), req)
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
-	}
-
-	// 应该包含所有技能
+	// With skills - prompt updated
+	m.AddSkill(Skill{Name: "git-workflow", Description: "Git best practices"})
+	req = &llm.ModelRequest{SystemPrompt: ""}
+	m.BeforeModel(context.Background(), req)
 	if req.SystemPrompt == "" {
-		t.Error("Expected system prompt to be set")
-	}
-
-	if !contains(req.SystemPrompt, "技能1") || !contains(req.SystemPrompt, "技能2") {
-		t.Error("Expected all skills to be included in system prompt")
+		t.Error("Expected prompt to be set")
 	}
 }
 
-func TestSkillsMiddleware_BeforeModel_ManualMode(t *testing.T) {
-	m := NewSkillsMiddleware(&SkillsConfig{DisclosureMode: "manual"})
-	m.skills = []Skill{
-		{Name: "技能1", Description: "描述1"},
-		{Name: "技能2", Description: "描述2"},
-	}
+func TestSkillsMiddleware_SkillTool(t *testing.T) {
+	registry := tools.NewRegistry()
+	m := NewSkillsMiddleware(registry)
+	m.AddSkill(Skill{
+		Name:        "test-skill",
+		Description: "A test skill",
+		Content:     "# Test Content",
+		BasePath:    "/test/path",
+	})
 
-	// 只启用技能1
-	m.EnableSkill("技能1")
+	tool, _ := registry.Get("Skill")
 
-	req := &llm.ModelRequest{
-		Messages:     []llm.Message{{Role: llm.RoleUser, Content: "测试"}},
-		SystemPrompt: "",
-	}
-
-	err := m.BeforeModel(context.Background(), req)
+	// Existing skill
+	result, err := tool.Execute(context.Background(), map[string]any{"skill": "test-skill"})
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
-
-	// 应该只包含启用的技能
-	if !contains(req.SystemPrompt, "技能1") {
-		t.Error("Expected enabled skill to be included")
+	if !contains(result, "Test Content") {
+		t.Error("Expected result to contain skill content")
+	}
+	if !m.IsSkillLoaded("test-skill") {
+		t.Error("Expected skill to be marked as loaded")
 	}
 
-	if contains(req.SystemPrompt, "技能2") {
-		t.Error("Expected disabled skill to be excluded")
+	// Nonexistent skill
+	result, _ = tool.Execute(context.Background(), map[string]any{"skill": "nonexistent"})
+	if !contains(result, "不存在") {
+		t.Error("Expected error message for nonexistent skill")
 	}
 }
 
-func TestSkillsMiddleware_BeforeModel_ProgressiveMode(t *testing.T) {
-	m := NewSkillsMiddleware(&SkillsConfig{DisclosureMode: "progressive"})
-	m.skills = []Skill{
-		{Name: "文件操作", Description: "文件相关", Keywords: []string{"文件", "file"}},
-		{Name: "任务规划", Description: "任务相关", Keywords: []string{"任务", "task"}},
-	}
-	m.buildKeywordMap()
+func TestSkillsMiddleware_LoadFromDirectory(t *testing.T) {
+	tmpDir, _ := os.MkdirTemp("", "skills-test")
+	defer os.RemoveAll(tmpDir)
 
-	// 消息中包含"文件"关键词
-	req := &llm.ModelRequest{
-		Messages: []llm.Message{
-			{Role: llm.RoleUser, Content: "请帮我读取文件"},
-		},
-		SystemPrompt: "",
-	}
+	skillDir := filepath.Join(tmpDir, "git-workflow")
+	os.MkdirAll(skillDir, 0755)
+	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(`---
+name: git-workflow
+description: Git best practices
+---
+# Content`), 0644)
 
-	err := m.BeforeModel(context.Background(), req)
-	if err != nil {
-		t.Errorf("Expected no error, got %v", err)
-	}
+	m := NewSkillsMiddleware(nil)
+	m.LoadFromDirectory(tmpDir)
 
-	// 应该包含相关技能
-	if !contains(req.SystemPrompt, "文件操作") {
-		t.Error("Expected relevant skill to be included")
+	if len(m.skills) != 1 {
+		t.Errorf("Expected 1 skill, got %d", len(m.skills))
 	}
 }
 
 func TestSkillsMiddleware_BeforeAgent(t *testing.T) {
 	m := NewSkillsMiddleware(nil)
-	state := agent.NewState()
-
-	err := m.BeforeAgent(context.Background(), state)
+	err := m.BeforeAgent(context.Background(), agent.NewState())
 	if err != nil {
 		t.Errorf("Expected no error, got %v", err)
 	}
-
-	// 如果 SKILLS.md 存在，应该被加载
-	if len(m.skills) > 0 {
-		t.Log("SKILLS.md loaded successfully")
-	}
 }
 
-func TestSkillsMiddleware_ParseSkills(t *testing.T) {
-	m := NewSkillsMiddleware(nil)
-
-	content := `# Skills
-
-## Skill: 测试技能
-
-**描述**: 这是一个测试技能
-
-**使用场景**: 用于测试
-
-**可用工具**:
-- ` + "`test_tool`" + `: 测试工具
-- ` + "`another_tool`" + `: 另一个工具
-
-**最佳实践**: 遵循最佳实践
-
-**相关技能**: 技能A、技能B
-`
-
-	skills, err := m.parseSkills(content)
-	if err != nil {
-		t.Fatalf("Failed to parse skills: %v", err)
-	}
-
-	if len(skills) != 1 {
-		t.Fatalf("Expected 1 skill, got %d", len(skills))
-	}
-
-	skill := skills[0]
-	if skill.Name != "测试技能" {
-		t.Errorf("Expected name '测试技能', got '%s'", skill.Name)
-	}
-
-	if skill.Description != "这是一个测试技能" {
-		t.Errorf("Expected description to be set, got '%s'", skill.Description)
-	}
-
-	if len(skill.Tools) < 2 {
-		t.Errorf("Expected at least 2 tools, got %d", len(skill.Tools))
-	}
-
-	if len(skill.RelatedSkills) != 2 {
-		t.Errorf("Expected 2 related skills, got %d", len(skill.RelatedSkills))
-	}
-}
-
-func TestSkillsMiddleware_ExtractTools(t *testing.T) {
-	m := NewSkillsMiddleware(nil)
-
-	content := "使用 `read_file` 和 `write_file` 工具，还有 `SomeClass` 类"
-
-	tools := m.extractTools(content)
-
-	// 应该提取出工具名（包含下划线的）
-	if !containsString(tools, "read_file") {
-		t.Error("Expected to extract 'read_file'")
-	}
-
-	if !containsString(tools, "write_file") {
-		t.Error("Expected to extract 'write_file'")
-	}
-}
-
-func TestSkillsMiddleware_GetRelevantSkills(t *testing.T) {
-	m := NewSkillsMiddleware(nil)
-	m.skills = []Skill{
-		{Name: "文件操作", Keywords: []string{"文件", "file"}},
-		{Name: "任务规划", Keywords: []string{"任务", "task"}},
-		{Name: "代码开发", Keywords: []string{"代码", "code"}},
-	}
-	m.buildKeywordMap()
-
-	messages := []llm.Message{
-		{Role: llm.RoleUser, Content: "请帮我读取文件"},
-	}
-
-	relevant := m.getRelevantSkills(messages)
-
-	// 应该返回相关技能
-	if len(relevant) == 0 {
-		t.Error("Expected to find relevant skills")
-	}
-
-	// 应该包含文件操作技能
-	found := false
-	for _, skill := range relevant {
-		if skill.Name == "文件操作" {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Error("Expected to find '文件操作' skill")
-	}
-}
-
-func TestSkillsMiddleware_GetRelevantSkills_NoMatch(t *testing.T) {
-	m := NewSkillsMiddleware(nil)
-	m.skills = []Skill{
-		{Name: "技能1", Keywords: []string{"keyword1"}},
-		{Name: "技能2", Keywords: []string{"keyword2"}},
-		{Name: "技能3", Keywords: []string{"keyword3"}},
-		{Name: "技能4", Keywords: []string{"keyword4"}},
-	}
-	m.buildKeywordMap()
-
-	messages := []llm.Message{
-		{Role: llm.RoleUser, Content: "没有匹配的关键词"},
-	}
-
-	relevant := m.getRelevantSkills(messages)
-
-	// 没有匹配时，应该返回前3个技能
-	if len(relevant) != 3 {
-		t.Errorf("Expected 3 default skills, got %d", len(relevant))
-	}
-}
-
-// 辅助函数
 func contains(s, substr string) bool {
-	return len(s) > 0 && len(substr) > 0 && (s == substr || len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || containsSubstring(s, substr)))
-}
-
-func containsSubstring(s, substr string) bool {
 	for i := 0; i <= len(s)-len(substr); i++ {
 		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-func containsString(slice []string, str string) bool {
-	for _, s := range slice {
-		if s == str {
 			return true
 		}
 	}

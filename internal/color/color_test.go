@@ -26,6 +26,7 @@ func TestColorize(t *testing.T) {
 		{"Gray", Gray, "test", gray + "test" + reset},
 		{"Magenta", Magenta, "test", magenta + "test" + reset},
 		{"Bold", Bold, "test", bold + "test" + reset},
+		{"BoldCyan", BoldCyan, "test", bold + cyan + "test" + reset},
 	}
 
 	for _, tt := range tests {

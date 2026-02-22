@@ -45,7 +45,7 @@ func main() {
 	}
 
 	// 创建 Agent
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 
 	// 执行示例任务
 	ctx := context.Background()

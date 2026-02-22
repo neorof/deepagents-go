@@ -1,12 +1,16 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	ignore "github.com/sabhiram/go-gitignore"
 )
 
 // FilesystemBackend 实现基于真实文件系统的后端
@@ -194,6 +198,15 @@ func (b *FilesystemBackend) Grep(ctx context.Context, pattern, path, glob string
 		searchPath = fullPath
 	}
 
+	// 加载 .gitignore 文件
+	var gitignore *ignore.GitIgnore
+	gitignorePath := filepath.Join(searchPath, ".gitignore")
+	if _, err := os.Stat(gitignorePath); err == nil {
+		if gi, err := ignore.CompileIgnoreFile(gitignorePath); err == nil {
+			gitignore = gi
+		}
+	}
+
 	var matches []GrepMatch
 
 	err := filepath.WalkDir(searchPath, func(filePath string, d fs.DirEntry, err error) error {
@@ -201,7 +214,44 @@ func (b *FilesystemBackend) Grep(ctx context.Context, pattern, path, glob string
 			return nil // 忽略错误，继续搜索
 		}
 
+		// 获取相对路径用于 gitignore 匹配
+		relPath, _ := filepath.Rel(searchPath, filePath)
+
+		// 检查 .gitignore 规则
+		if gitignore != nil && relPath != "." {
+			if gitignore.MatchesPath(relPath) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+
+		// 跳过必要的目录（.git 始终跳过）
 		if d.IsDir() {
+			name := d.Name()
+			if name == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// 通过扩展名快速跳过已知的二进制文件
+		if isBinaryExtension(filePath) {
+			return nil
+		}
+
+		// glob 过滤
+		if glob != "" {
+			matched, err := filepath.Match(glob, filepath.Base(filePath))
+			if err != nil || !matched {
+				return nil
+			}
+		}
+
+		// 跳过大文件（>1MB）
+		info, err := d.Info()
+		if err != nil || info.Size() > 1<<20 {
 			return nil
 		}
 
@@ -211,16 +261,36 @@ func (b *FilesystemBackend) Grep(ctx context.Context, pattern, path, glob string
 			return nil // 忽略读取错误
 		}
 
+		// 跳过二进制文件：检查前 8KB 是否包含 NUL 字节
+		checkLen := len(data)
+		if checkLen > 8192 {
+			checkLen = 8192
+		}
+		if bytes.IndexByte(data[:checkLen], 0) != -1 {
+			return nil
+		}
+
+		// 编译正则表达式
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			// 编译失败时，降级到字面字符串匹配
+			re = regexp.MustCompile(regexp.QuoteMeta(pattern))
+		}
+
 		// 搜索匹配
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
-			if strings.Contains(line, pattern) {
+			if re.MatchString(line) {
 				relPath, _ := filepath.Rel(b.rootDir, filePath)
+				matchStr := re.FindString(line)
+				if matchStr == "" {
+					matchStr = pattern // 降级情况下使用原始 pattern
+				}
 				matches = append(matches, GrepMatch{
 					Path:       "/" + relPath,
 					LineNumber: i + 1,
 					Line:       line,
-					Match:      pattern,
+					Match:      matchStr,
 				})
 			}
 		}
@@ -233,6 +303,24 @@ func (b *FilesystemBackend) Grep(ctx context.Context, pattern, path, glob string
 	}
 
 	return matches, nil
+}
+
+// isBinaryExtension 通过扩展名判断是否为二进制文件
+func isBinaryExtension(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".exe", ".dll", ".so", ".dylib", ".a", ".o", ".obj",
+		".bin", ".wasm", ".pyc", ".pyo", ".class",
+		".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
+		".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
+		".mp3", ".mp4", ".avi", ".mov", ".wav", ".flac",
+		".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+		".ttf", ".otf", ".woff", ".woff2", ".eot",
+		".db", ".sqlite", ".sqlite3":
+		return true
+	}
+	// 无扩展名的文件不在此处判断，交给 NUL 检测
+	return false
 }
 
 // Glob 查找匹配的文件
@@ -269,6 +357,18 @@ func (b *FilesystemBackend) Glob(ctx context.Context, pattern, path string) ([]F
 	}
 
 	return files, nil
+}
+
+// DeleteFile 删除文件
+func (b *FilesystemBackend) DeleteFile(ctx context.Context, path string) error {
+	fullPath, err := b.resolvePath(path)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(fullPath); err != nil {
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
+	return nil
 }
 
 // Execute 不支持命令执行

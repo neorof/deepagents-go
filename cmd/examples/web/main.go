@@ -33,7 +33,7 @@ func main() {
 	// 创建工具注册表
 	toolRegistry := tools.NewRegistry()
 
-	// 创建文件系统后端（使用真实文件系统）
+	// 创建文件系统后端
 	fsBackend, err := backend.NewFilesystemBackend(workDir, true)
 	if err != nil {
 		log.Fatalf("Failed to create filesystem backend: %v", err)
@@ -42,14 +42,20 @@ func main() {
 	// 创建文件系统中间件
 	filesystemMiddleware := middleware.NewFilesystemMiddleware(fsBackend, toolRegistry)
 
+	// 创建 Web 中间件
+	webConfig := middleware.DefaultWebConfig()
+	webMiddleware := middleware.NewWebMiddleware(toolRegistry, webConfig)
+
 	// 创建 Agent 配置
-	config := &agent.Config{
+	agentConfig := &agent.Config{
 		LLMClient:    llmClient,
 		ToolRegistry: toolRegistry,
-		Middlewares:  []agent.Middleware{filesystemMiddleware},
-		SystemPrompt: `你是一个有用的 AI 助手，可以帮助用户管理文件和执行任务。
+		Middlewares:  []agent.Middleware{filesystemMiddleware, webMiddleware},
+		SystemPrompt: `你是一个有用的 AI 助手，可以帮助用户搜索网络内容和管理文件。
 
 可用工具：
+- web_search: 搜索网络内容并返回结果摘要
+- web_fetch: 获取指定 URL 的内容并转换为 Markdown
 - ls: 列出目录下的文件
 - read_file: 读取文件内容
 - write_file: 写入文件
@@ -64,20 +70,20 @@ func main() {
 	}
 
 	// 创建 Agent
-	executor := agent.NewRunnable(config)
+	executor := agent.NewRunnable(agentConfig)
 
 	// 执行示例任务
 	ctx := context.Background()
 
-	fmt.Println("=== Deep Agents Go - 文件系统示例 ===")
+	fmt.Println("=== Deep Agents Go - Web 工具示例 ===")
 
-	// 任务 1：创建文件
-	fmt.Println("任务 1：创建一个 README.md 文件")
+	// 任务 1：搜索网络内容
+	fmt.Println("\n任务 1：搜索 'Go 语言 2026 新特性'")
 	output1, err := executor.Invoke(ctx, &agent.InvokeInput{
 		Messages: []llm.Message{
 			{
 				Role:    llm.RoleUser,
-				Content: "创建一个 README.md 文件，内容包括项目标题 'My Project' 和简短描述 'This is a test project.'",
+				Content: "搜索 'Go 语言 2026 新特性'，并总结前 3 条结果。",
 			},
 		},
 	})
@@ -86,13 +92,13 @@ func main() {
 	}
 	printMessages(output1.Messages)
 
-	// 任务 2：读取并修改文件
-	fmt.Println("\n任务 2：读取 README.md 并添加一个新章节")
+	// 任务 2：获取网页内容
+	fmt.Println("\n任务 2：获取 https://go.dev 首页的内容摘要")
 	output2, err := executor.Invoke(ctx, &agent.InvokeInput{
 		Messages: []llm.Message{
 			{
 				Role:    llm.RoleUser,
-				Content: "读取 README.md 文件，然后在末尾添加一个 '## Features' 章节，列出 3 个功能特性。",
+				Content: "获取 https://go.dev 首页的内容，并提取主要信息（标题、简介等）。",
 			},
 		},
 	})
@@ -101,13 +107,13 @@ func main() {
 	}
 	printMessages(output2.Messages)
 
-	// 任务 3：创建多个文件
-	fmt.Println("\n任务 3：创建项目结构")
+	// 任务 3：搜索并保存结果
+	fmt.Println("\n任务 3：搜索最新的 AI 新闻，并保存结果到文件")
 	output3, err := executor.Invoke(ctx, &agent.InvokeInput{
 		Messages: []llm.Message{
 			{
 				Role:    llm.RoleUser,
-				Content: "创建以下文件结构：\n- src/main.go (包含 Hello World 程序)\n- src/utils.go (包含一个简单的工具函数)\n- tests/main_test.go (包含一个测试用例)",
+				Content: "搜索 '2026 AI 新闻'，获取前 5 条结果，并将结果保存到 /ai_news.md 文件中。文件格式为 Markdown，包含标题、链接和摘要。",
 			},
 		},
 	})
@@ -116,13 +122,13 @@ func main() {
 	}
 	printMessages(output3.Messages)
 
-	// 任务 4：搜索文件
-	fmt.Println("\n任务 4：搜索包含 'Hello' 的文件")
+	// 任务 4：获取网页并保存
+	fmt.Println("\n任务 4：获取一篇技术文章并保存")
 	output4, err := executor.Invoke(ctx, &agent.InvokeInput{
 		Messages: []llm.Message{
 			{
 				Role:    llm.RoleUser,
-				Content: "使用 grep 搜索所有包含 'Hello' 的文件，并列出结果。",
+				Content: "搜索 'Go 并发编程最佳实践'，选择第一个结果，获取该网页的内容，并保存到 /go_concurrency.md 文件中。",
 			},
 		},
 	})

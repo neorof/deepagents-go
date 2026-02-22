@@ -22,6 +22,9 @@ type Backend interface {
 	// Glob 查找匹配的文件
 	Glob(ctx context.Context, pattern, path string) ([]FileInfo, error)
 
+	// DeleteFile 删除文件
+	DeleteFile(ctx context.Context, path string) error
+
 	// Execute 执行命令（可选，某些后端不支持）
 	Execute(ctx context.Context, command string, timeout int) (*ExecuteResult, error)
 }

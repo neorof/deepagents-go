@@ -143,7 +143,7 @@ func (m *SubAgentMiddleware) executeSubAgent(ctx context.Context, args map[strin
 	}
 
 	// 创建子Agent执行器
-	subExecutor := agent.NewExecutor(subAgentConfig)
+	subExecutor := agent.NewRunnable(subAgentConfig)
 
 	// 创建带深度信息的上下文
 	subCtx := m.withDepth(ctx, depth+1)

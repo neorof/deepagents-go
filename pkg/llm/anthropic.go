@@ -34,13 +34,54 @@ func NewAnthropicClient(apiKey, model, baseUrl string) *AnthropicClient {
 	}
 }
 
+// convertMessages 将内部消息格式转换为 Anthropic SDK 消息格式
+func convertMessages(msgs []Message) []anthropic.MessageParam {
+	messages := make([]anthropic.MessageParam, 0, len(msgs))
+	for _, msg := range msgs {
+		switch msg.Role {
+		case RoleAssistant:
+			// 构建 assistant 消息的内容块
+			blocks := make([]anthropic.ContentBlockParamUnion, 0)
+
+			// 添加文本内容
+			if msg.Content != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
+			}
+
+			// 添加工具调用
+			for _, tc := range msg.ToolCalls {
+				blocks = append(blocks, anthropic.NewToolUseBlockParam(tc.ID, tc.Name, tc.Input))
+			}
+
+			messages = append(messages, anthropic.NewAssistantMessage(blocks...))
+
+		default: // RoleUser
+			// 构建 user 消息的内容块
+			blocks := make([]anthropic.ContentBlockParamUnion, 0)
+
+			// 添加文本内容
+			if msg.Content != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
+			}
+
+			// 添加工具结果
+			for _, tr := range msg.ToolResults {
+				blocks = append(blocks, anthropic.NewToolResultBlock(tr.ToolCallID, tr.Content, tr.IsError))
+			}
+
+			messages = append(messages, anthropic.NewUserMessage(blocks...))
+		}
+	}
+	return messages
+}
+
 // Generate 生成响应
 func (c *AnthropicClient) Generate(ctx context.Context, req *ModelRequest) (*ModelResponse, error) {
+	// 记录请求信息
+	logRequest("anthropic", c.model, req, false)
+
 	// 转换消息格式
-	messages := make([]anthropic.MessageParam, 0, len(req.Messages))
-	for _, msg := range req.Messages {
-		messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
-	}
+	messages := convertMessages(req.Messages)
 
 	// 构建请求参数
 	params := anthropic.MessageNewParams{
@@ -118,14 +159,14 @@ func (c *AnthropicClient) CountTokens(messages []Message) int {
 
 // StreamGenerate 生成流式响应
 func (c *AnthropicClient) StreamGenerate(ctx context.Context, req *ModelRequest) (<-chan StreamEvent, error) {
+	// 记录请求信息
+	logRequest("anthropic", c.model, req, true)
+
 	// 创建事件 channel
 	eventChan := make(chan StreamEvent, 10)
 
 	// 转换消息格式
-	messages := make([]anthropic.MessageParam, 0, len(req.Messages))
-	for _, msg := range req.Messages {
-		messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
-	}
+	messages := convertMessages(req.Messages)
 
 	// 构建请求参数
 	params := anthropic.MessageNewParams{

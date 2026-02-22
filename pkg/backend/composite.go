@@ -193,6 +193,12 @@ func (b *CompositeBackend) Glob(ctx context.Context, pattern, path string) ([]Fi
 	return files, nil
 }
 
+// DeleteFile 删除文件
+func (b *CompositeBackend) DeleteFile(ctx context.Context, path string) error {
+	backend, relPath := b.getBackendAndKey(path)
+	return backend.DeleteFile(ctx, relPath)
+}
+
 // Execute 执行命令
 func (b *CompositeBackend) Execute(ctx context.Context, command string, timeout int) (*ExecuteResult, error) {
 	return nil, fmt.Errorf("execute not supported by CompositeBackend")

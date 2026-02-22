@@ -40,3 +40,7 @@ func (m *BaseMiddleware) BeforeTool(ctx context.Context, toolCall *llm.ToolCall,
 func (m *BaseMiddleware) AfterTool(ctx context.Context, result *llm.ToolResult, state *agent.State) error {
 	return nil
 }
+
+func (m *BaseMiddleware) AfterAgent(ctx context.Context, state *agent.State) error {
+	return nil
+}

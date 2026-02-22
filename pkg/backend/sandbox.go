@@ -294,6 +294,24 @@ func (b *SandboxBackend) Glob(ctx context.Context, pattern, path string) ([]File
 	return files, err
 }
 
+// DeleteFile 删除文件
+func (b *SandboxBackend) DeleteFile(ctx context.Context, path string) error {
+	if b.config.ReadOnly {
+		err := fmt.Errorf("delete operation not allowed in read-only mode")
+		b.audit("DeleteFile", path, false, err)
+		return err
+	}
+
+	if err := b.checkOperation(ctx, "DeleteFile", path); err != nil {
+		b.audit("DeleteFile", path, false, err)
+		return err
+	}
+
+	err := b.backend.DeleteFile(ctx, path)
+	b.audit("DeleteFile", path, err == nil, err)
+	return err
+}
+
 // Execute 执行命令
 func (b *SandboxBackend) Execute(ctx context.Context, command string, timeout int) (*ExecuteResult, error) {
 	if b.config.ReadOnly {

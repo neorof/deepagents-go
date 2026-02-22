@@ -3,7 +3,10 @@ package backend
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sync"
+
+	"github.com/zhoucx/deepagents-go/pkg/internal/stringutil"
 )
 
 // StateBackend 实现基于内存的状态存储
@@ -47,7 +50,7 @@ func (b *StateBackend) ReadFile(ctx context.Context, path string, offset, limit 
 
 	// 处理偏移和限制
 	if offset > 0 || limit > 0 {
-		lines := splitLines(content)
+		lines := stringutil.SplitLines(content)
 		if offset >= len(lines) {
 			return "", nil
 		}
@@ -55,7 +58,7 @@ func (b *StateBackend) ReadFile(ctx context.Context, path string, offset, limit 
 		if limit > 0 && offset+limit < end {
 			end = offset + limit
 		}
-		return joinLines(lines[offset:end]), nil
+		return stringutil.JoinLines(lines[offset:end]), nil
 	}
 
 	return content, nil
@@ -90,7 +93,7 @@ func (b *StateBackend) EditFile(ctx context.Context, path, oldStr, newStr string
 		// 替换所有匹配
 		newContent := ""
 		for {
-			idx := indexOf(content, oldStr)
+			idx := stringutil.IndexOf(content, oldStr)
 			if idx == -1 {
 				newContent += content
 				break
@@ -102,7 +105,7 @@ func (b *StateBackend) EditFile(ctx context.Context, path, oldStr, newStr string
 		content = newContent
 	} else {
 		// 只替换第一个匹配
-		idx := indexOf(content, oldStr)
+		idx := stringutil.IndexOf(content, oldStr)
 		if idx == -1 {
 			return nil, fmt.Errorf("string not found: %s", oldStr)
 		}
@@ -124,16 +127,27 @@ func (b *StateBackend) Grep(ctx context.Context, pattern, path, glob string) ([]
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
+	// 编译正则表达式
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		// 编译失败时，降级到字面字符串匹配
+		re = regexp.MustCompile(regexp.QuoteMeta(pattern))
+	}
+
 	var matches []GrepMatch
 	for p, content := range b.files {
-		lines := splitLines(content)
+		lines := stringutil.SplitLines(content)
 		for i, line := range lines {
-			if contains(line, pattern) {
+			if re.MatchString(line) {
+				matchStr := re.FindString(line)
+				if matchStr == "" {
+					matchStr = pattern // 降级情况下使用原始 pattern
+				}
 				matches = append(matches, GrepMatch{
 					Path:       p,
 					LineNumber: i + 1,
 					Line:       line,
-					Match:      pattern,
+					Match:      matchStr,
 				})
 			}
 		}
@@ -157,47 +171,19 @@ func (b *StateBackend) Glob(ctx context.Context, pattern, path string) ([]FileIn
 	return files, nil
 }
 
+// DeleteFile 删除文件
+func (b *StateBackend) DeleteFile(ctx context.Context, path string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if _, ok := b.files[path]; !ok {
+		return fmt.Errorf("file not found: %s", path)
+	}
+	delete(b.files, path)
+	return nil
+}
+
 // Execute 不支持命令执行
 func (b *StateBackend) Execute(ctx context.Context, command string, timeout int) (*ExecuteResult, error) {
 	return nil, fmt.Errorf("execute not supported by StateBackend")
-}
-
-// 辅助函数
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
-
-func joinLines(lines []string) string {
-	result := ""
-	for i, line := range lines {
-		if i > 0 {
-			result += "\n"
-		}
-		result += line
-	}
-	return result
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
-
-func contains(s, substr string) bool {
-	return indexOf(s, substr) != -1
 }

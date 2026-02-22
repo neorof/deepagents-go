@@ -25,7 +25,7 @@ func (r *Registry) Register(tool Tool) error {
 
 	name := tool.Name()
 	if _, exists := r.tools[name]; exists {
-		return fmt.Errorf("tool %s already registered", name)
+		return fmt.Errorf("tool [%s] already registered", name)
 	}
 
 	r.tools[name] = tool

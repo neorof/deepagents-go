@@ -54,7 +54,7 @@ func main() {
 	}
 
 	// 创建 Agent
-	executor := agent.NewExecutor(agentConfig)
+	executor := agent.NewRunnable(agentConfig)
 
 	// 示例任务
 	tasks := []string{

@@ -83,7 +83,7 @@ func main() {
 	}
 
 	// 创建 Agent
-	executor := agent.NewExecutor(agentConfig)
+	executor := agent.NewRunnable(agentConfig)
 
 	// 测试用例：这些任务应该触发正确的工具使用
 	testCases := []struct {

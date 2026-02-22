@@ -52,7 +52,7 @@ func TestFileOperations(t *testing.T) {
 		MaxTokens:     1000,
 	}
 
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 
 	// 执行任务
 	ctx := context.Background()
@@ -132,7 +132,7 @@ func TestMultipleToolCalls(t *testing.T) {
 		MaxTokens:     1000,
 	}
 
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 	ctx := context.Background()
 
 	output, err := executor.Invoke(ctx, &agent.InvokeInput{
@@ -219,7 +219,7 @@ func TestReadAndEdit(t *testing.T) {
 		MaxTokens:     1000,
 	}
 
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 	ctx := context.Background()
 
 	_, err := executor.Invoke(ctx, &agent.InvokeInput{
@@ -306,7 +306,7 @@ func TestSearchFiles(t *testing.T) {
 		MaxTokens:     1000,
 	}
 
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 	ctx := context.Background()
 
 	output, err := executor.Invoke(ctx, &agent.InvokeInput{

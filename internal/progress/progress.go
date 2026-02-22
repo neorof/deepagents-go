@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/zhoucx/deepagents-go/internal/color"
 )
 
 // Indicator 进度指示器
@@ -15,6 +17,7 @@ type Indicator struct {
 	enabled bool
 	mu      sync.Mutex
 	done    chan struct{}
+	running bool
 	message string
 	spinner []string
 	index   int
@@ -25,7 +28,6 @@ func New(enabled bool) *Indicator {
 	return &Indicator{
 		writer:  os.Stderr,
 		enabled: enabled,
-		done:    make(chan struct{}),
 		spinner: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 	}
 }
@@ -37,8 +39,16 @@ func (i *Indicator) Start(message string) {
 	}
 
 	i.mu.Lock()
+	if i.running {
+		// 已经在运行，只更新消息
+		i.message = message
+		i.mu.Unlock()
+		return
+	}
 	i.message = message
 	i.index = 0
+	i.done = make(chan struct{})
+	i.running = true
 	i.mu.Unlock()
 
 	go i.spin()
@@ -61,14 +71,15 @@ func (i *Indicator) Stop() {
 		return
 	}
 
-	select {
-	case <-i.done:
-		// 已经停止
+	i.mu.Lock()
+	if !i.running {
+		i.mu.Unlock()
 		return
-	default:
-		close(i.done)
-		i.clear()
 	}
+	i.running = false
+	close(i.done)
+	i.mu.Unlock()
+	i.clear()
 }
 
 // spin 旋转动画
@@ -103,8 +114,8 @@ func (i *Indicator) render() {
 
 // clear 清除当前行
 func (i *Indicator) clear() {
-	// 使用 ANSI 转义序列清除行
-	fmt.Fprint(i.writer, "\r"+strings.Repeat(" ", 80)+"\r")
+	// 使用 ANSI 转义序列清除整行并回到行首
+	fmt.Fprint(i.writer, "\033[2K\r")
 }
 
 // Bar 进度条
@@ -204,7 +215,7 @@ func (t *Tracker) StartIteration(n int) {
 	t.stats.Iterations = n
 	t.mu.Unlock()
 
-	t.indicator.Update(fmt.Sprintf("迭代 %d", n))
+	t.indicator.Update("")
 }
 
 // RecordToolCall 记录工具调用
@@ -213,7 +224,7 @@ func (t *Tracker) RecordToolCall(toolName string) {
 	t.stats.ToolCalls++
 	t.mu.Unlock()
 
-	t.indicator.Update(fmt.Sprintf("迭代 %d - 调用工具: %s", t.stats.Iterations, toolName))
+	t.indicator.Update(fmt.Sprintf("- 调用工具: %s", toolName))
 }
 
 // RecordTokens 记录 token 使用
@@ -243,8 +254,8 @@ func (t *Tracker) GetStats() Stats {
 // PrintStats 打印统计信息
 func (t *Tracker) PrintStats() {
 	stats := t.GetStats()
-	fmt.Printf("\n统计信息:\n")
-	fmt.Printf("  迭代次数: %d\n", stats.Iterations)
-	fmt.Printf("  工具调用: %d\n", stats.ToolCalls)
-	fmt.Printf("  Token 使用: %d\n", stats.Tokens)
+	fmt.Print(color.Gray("\n统计信息:"))
+	fmt.Print(color.Gray(fmt.Sprintf("  迭代次数: %d", stats.Iterations)))
+	fmt.Print(color.Gray(fmt.Sprintf("  工具调用: %d", stats.ToolCalls)))
+	fmt.Println()
 }

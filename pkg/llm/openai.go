@@ -35,6 +35,9 @@ func NewOpenAIClient(apiKey, model, baseURL string) *OpenAIClient {
 
 // Generate 生成响应
 func (c *OpenAIClient) Generate(ctx context.Context, req *ModelRequest) (*ModelResponse, error) {
+	// 记录请求信息
+	logRequest("openai", c.model, req, false)
+
 	// 转换消息格式
 	messages := make([]openai.ChatCompletionMessage, 0, len(req.Messages)+1)
 
@@ -48,22 +51,63 @@ func (c *OpenAIClient) Generate(ctx context.Context, req *ModelRequest) (*ModelR
 
 	// 添加用户和助手消息
 	for _, msg := range req.Messages {
-		role := ""
 		switch msg.Role {
-		case RoleUser:
-			role = openai.ChatMessageRoleUser
 		case RoleAssistant:
-			role = openai.ChatMessageRoleAssistant
-		case RoleSystem:
-			role = openai.ChatMessageRoleSystem
-		default:
-			role = openai.ChatMessageRoleUser
-		}
+			// Assistant 消息：可能包含文本内容和工具调用
+			assistantMsg := openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleAssistant,
+				Content: msg.Content,
+			}
 
-		messages = append(messages, openai.ChatCompletionMessage{
-			Role:    role,
-			Content: msg.Content,
-		})
+			// 添加工具调用
+			if len(msg.ToolCalls) > 0 {
+				assistantMsg.ToolCalls = make([]openai.ToolCall, 0, len(msg.ToolCalls))
+				for _, tc := range msg.ToolCalls {
+					// 将参数转换为 JSON 字符串
+					argsJSON, _ := json.Marshal(tc.Input)
+					assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, openai.ToolCall{
+						ID:   tc.ID,
+						Type: openai.ToolTypeFunction,
+						Function: openai.FunctionCall{
+							Name:      tc.Name,
+							Arguments: string(argsJSON),
+						},
+					})
+				}
+			}
+
+			messages = append(messages, assistantMsg)
+
+		case RoleUser:
+			// User 消息：可能包含文本内容
+			if msg.Content != "" {
+				messages = append(messages, openai.ChatCompletionMessage{
+					Role:    openai.ChatMessageRoleUser,
+					Content: msg.Content,
+				})
+			}
+
+			// 添加工具结果（作为独立的 tool 消息）
+			for _, tr := range msg.ToolResults {
+				messages = append(messages, openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					Content:    tr.Content,
+					ToolCallID: tr.ToolCallID,
+				})
+			}
+
+		case RoleSystem:
+			messages = append(messages, openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: msg.Content,
+			})
+
+		default:
+			messages = append(messages, openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleUser,
+				Content: msg.Content,
+			})
+		}
 	}
 
 	// 构建请求参数
@@ -156,6 +200,9 @@ func (c *OpenAIClient) CountTokens(messages []Message) int {
 
 // StreamGenerate 生成流式响应
 func (c *OpenAIClient) StreamGenerate(ctx context.Context, req *ModelRequest) (<-chan StreamEvent, error) {
+	// 记录请求信息
+	logRequest("openai", c.model, req, true)
+
 	// 创建事件 channel
 	eventChan := make(chan StreamEvent, 10)
 
@@ -172,22 +219,63 @@ func (c *OpenAIClient) StreamGenerate(ctx context.Context, req *ModelRequest) (<
 
 	// 添加用户和助手消息
 	for _, msg := range req.Messages {
-		role := ""
 		switch msg.Role {
-		case RoleUser:
-			role = openai.ChatMessageRoleUser
 		case RoleAssistant:
-			role = openai.ChatMessageRoleAssistant
-		case RoleSystem:
-			role = openai.ChatMessageRoleSystem
-		default:
-			role = openai.ChatMessageRoleUser
-		}
+			// Assistant 消息：可能包含文本内容和工具调用
+			assistantMsg := openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleAssistant,
+				Content: msg.Content,
+			}
 
-		messages = append(messages, openai.ChatCompletionMessage{
-			Role:    role,
-			Content: msg.Content,
-		})
+			// 添加工具调用
+			if len(msg.ToolCalls) > 0 {
+				assistantMsg.ToolCalls = make([]openai.ToolCall, 0, len(msg.ToolCalls))
+				for _, tc := range msg.ToolCalls {
+					// 将参数转换为 JSON 字符串
+					argsJSON, _ := json.Marshal(tc.Input)
+					assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, openai.ToolCall{
+						ID:   tc.ID,
+						Type: openai.ToolTypeFunction,
+						Function: openai.FunctionCall{
+							Name:      tc.Name,
+							Arguments: string(argsJSON),
+						},
+					})
+				}
+			}
+
+			messages = append(messages, assistantMsg)
+
+		case RoleUser:
+			// User 消息：可能包含文本内容
+			if msg.Content != "" {
+				messages = append(messages, openai.ChatCompletionMessage{
+					Role:    openai.ChatMessageRoleUser,
+					Content: msg.Content,
+				})
+			}
+
+			// 添加工具结果（作为独立的 tool 消息）
+			for _, tr := range msg.ToolResults {
+				messages = append(messages, openai.ChatCompletionMessage{
+					Role:       openai.ChatMessageRoleTool,
+					Content:    tr.Content,
+					ToolCallID: tr.ToolCallID,
+				})
+			}
+
+		case RoleSystem:
+			messages = append(messages, openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleSystem,
+				Content: msg.Content,
+			})
+
+		default:
+			messages = append(messages, openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleUser,
+				Content: msg.Content,
+			})
+		}
 	}
 
 	// 构建请求参数

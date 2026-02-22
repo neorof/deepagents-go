@@ -114,6 +114,14 @@ func Bold(text string) string {
 	return bold + text + reset
 }
 
+// BoldCyan 返回粗体青色文本（直接组合避免嵌套 reset 截断）
+func BoldCyan(text string) string {
+	if !Enabled || text == "" {
+		return text
+	}
+	return bold + cyan + text + reset
+}
+
 // DisableColor 禁用颜色输出
 func DisableColor() {
 	Enabled = false

@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/zhoucx/deepagents-go/internal/progress"
 	"github.com/zhoucx/deepagents-go/pkg/agent"
 	"github.com/zhoucx/deepagents-go/pkg/backend"
 	"github.com/zhoucx/deepagents-go/pkg/llm"
@@ -59,7 +60,7 @@ func demoBasicStream(apiKey, _ /* workDir */ string) {
 		SystemPrompt:  "你是一个有用的助手。",
 		MaxIterations: 5,
 	}
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 
 	// 准备输入
 	input := &agent.InvokeInput{
@@ -130,7 +131,7 @@ func demoStreamWithTools(apiKey, workDir string) {
 		SystemPrompt:  `你是一个文件管理助手。你可以创建、读取和编辑文件。`,
 		MaxIterations: 10,
 	}
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 
 	// 准备输入
 	input := &agent.InvokeInput{
@@ -154,6 +155,13 @@ func demoStreamWithTools(apiKey, workDir string) {
 	fmt.Println("Agent 执行过程:")
 	fmt.Println()
 
+	// 创建进度跟踪器
+	tracker := progress.NewTracker(true)
+	tracker.Start()
+	defer tracker.Stop()
+
+	var isFirstText bool
+
 	// 处理流式事件
 	for event := range stream {
 		switch event.Type {
@@ -161,9 +169,16 @@ func demoStreamWithTools(apiKey, workDir string) {
 			fmt.Println("✓ Agent 开始执行")
 
 		case agent.AgentEventTypeLLMStart:
+			tracker.StartIteration(event.Iteration)
 			fmt.Printf("\n→ 迭代 %d: LLM 开始生成...\n", event.Iteration)
+			isFirstText = true
 
 		case agent.AgentEventTypeLLMText:
+			// 第一次输出文本时，停止进度指示器
+			if isFirstText {
+				tracker.Stop()
+				isFirstText = false
+			}
 			// 实时显示 LLM 输出
 			fmt.Print(event.Content)
 
@@ -179,6 +194,7 @@ func demoStreamWithTools(apiKey, workDir string) {
 
 		case agent.AgentEventTypeToolStart:
 			if event.ToolCall != nil {
+				tracker.RecordToolCall(event.ToolCall.Name)
 				fmt.Printf("→ 执行工具: %s...\n", event.ToolCall.Name)
 			}
 
@@ -194,11 +210,17 @@ func demoStreamWithTools(apiKey, workDir string) {
 
 		case agent.AgentEventTypeIterationEnd:
 			fmt.Printf("\n✓ 迭代 %d 完成\n", event.Iteration)
+			// 重新启动进度指示器（如果还有下一轮）
+			tracker.Start()
 
 		case agent.AgentEventTypeEnd:
+			tracker.Stop()
 			fmt.Println("\n✓ Agent 执行完成")
+			// 显示统计信息
+			tracker.PrintStats()
 
 		case agent.AgentEventTypeError:
+			tracker.Stop()
 			fmt.Printf("\n✗ 错误: %v\n", event.Error)
 		}
 	}
@@ -209,4 +231,5 @@ func demoStreamWithTools(apiKey, workDir string) {
 	fmt.Println("  - 可见每个步骤的详细信息")
 	fmt.Println("  - 更好的用户体验")
 	fmt.Println("  - 可以提前终止执行")
+	fmt.Println("  - 自动跟踪迭代次数和工具调用")
 }

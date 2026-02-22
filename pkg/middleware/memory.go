@@ -2,214 +2,302 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
+	"sync"
+	"time"
 
 	"github.com/zhoucx/deepagents-go/pkg/agent"
+	"github.com/zhoucx/deepagents-go/pkg/backend"
 	"github.com/zhoucx/deepagents-go/pkg/llm"
 )
 
-// MemoryMiddleware 管理 Agent 的记忆
+// MemoryMiddleware 自动记录对话历史到 JSON 文件
 type MemoryMiddleware struct {
 	*BaseMiddleware
-	memories []Memory
-}
-
-// Memory 表示一条记忆
-type Memory struct {
-	Source  string // 记忆来源（文件路径或标识）
-	Content string // 记忆内容
-	Type    string // 记忆类型（system, user, context）
+	backend          backend.Backend
+	sessionID        string         // 会话 ID（UUID）
+	sessionRecord    *SessionRecord // 当前会话记录
+	currentIteration int            // 当前迭代编号
+	iterationLog     *IterationLog  // 当前迭代日志
+	resumeMode       bool           // 是否为恢复模式
+	mu               sync.Mutex     // 并发保护
 }
 
 // NewMemoryMiddleware 创建记忆中间件
-func NewMemoryMiddleware() *MemoryMiddleware {
+func NewMemoryMiddleware(b backend.Backend) *MemoryMiddleware {
 	return &MemoryMiddleware{
 		BaseMiddleware: NewBaseMiddleware("memory"),
-		memories:       make([]Memory, 0),
+		backend:        b,
 	}
 }
 
-// LoadFromFile 从文件加载记忆
-func (m *MemoryMiddleware) LoadFromFile(path string) error {
-	// 检查文件是否存在
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("记忆文件不存在: %s", path)
-	}
+// BeforeAgent 在 Agent 开始执行前初始化会话记录
+func (m *MemoryMiddleware) BeforeAgent(ctx context.Context, state *agent.State) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	// 读取文件内容
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("读取记忆文件失败: %w", err)
-	}
-
-	// 添加记忆
-	memory := Memory{
-		Source:  path,
-		Content: string(content),
-		Type:    "system",
-	}
-
-	m.memories = append(m.memories, memory)
-	return nil
-}
-
-// LoadFromDirectory 从目录加载所有记忆文件
-func (m *MemoryMiddleware) LoadFromDirectory(dir string) error {
-	// 支持的文件扩展名
-	extensions := []string{".md", ".txt"}
-
-	// 遍历目录
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("读取目录失败: %w", err)
-	}
-
-	loadedCount := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		// 检查文件扩展名
-		ext := filepath.Ext(entry.Name())
-		supported := false
-		for _, validExt := range extensions {
-			if ext == validExt {
-				supported = true
-				break
-			}
-		}
-
-		if !supported {
-			continue
-		}
-
-		// 加载文件
-		path := filepath.Join(dir, entry.Name())
-		if err := m.LoadFromFile(path); err != nil {
-			// 记录错误但继续加载其他文件
-			continue
-		}
-		loadedCount++
-	}
-
-	if loadedCount == 0 {
-		return fmt.Errorf("目录中没有找到记忆文件: %s", dir)
-	}
-
-	return nil
-}
-
-// AddMemory 添加记忆
-func (m *MemoryMiddleware) AddMemory(source, content, memoryType string) {
-	memory := Memory{
-		Source:  source,
-		Content: content,
-		Type:    memoryType,
-	}
-	m.memories = append(m.memories, memory)
-}
-
-// GetMemories 获取所有记忆
-func (m *MemoryMiddleware) GetMemories() []Memory {
-	return m.memories
-}
-
-// GetMemoriesByType 按类型获取记忆
-func (m *MemoryMiddleware) GetMemoriesByType(memoryType string) []Memory {
-	result := make([]Memory, 0)
-	for _, memory := range m.memories {
-		if memory.Type == memoryType {
-			result = append(result, memory)
+	// 1. 从 state.Metadata 获取 session_id（由 CLI 传入）
+	if sessionID, ok := state.GetMetadata("session_id"); ok {
+		if sid, ok := sessionID.(string); ok {
+			m.sessionID = sid
 		}
 	}
-	return result
-}
 
-// ClearMemories 清除所有记忆
-func (m *MemoryMiddleware) ClearMemories() {
-	m.memories = make([]Memory, 0)
-}
+	// 如果没有 session_id，生成新的 UUID
+	if m.sessionID == "" {
+		// 简单的 UUID 生成（实际应使用 github.com/google/uuid）
+		m.sessionID = fmt.Sprintf("%d", time.Now().UnixNano())
+		state.SetMetadata("session_id", m.sessionID)
+	}
 
-// RemoveMemory 删除指定来源的记忆
-func (m *MemoryMiddleware) RemoveMemory(source string) bool {
-	for i, memory := range m.memories {
-		if memory.Source == source {
-			m.memories = append(m.memories[:i], m.memories[i+1:]...)
-			return true
+	// 2. 如果是恢复模式，尝试加载已有会话
+	if m.resumeMode {
+		m.resumeMode = false // 无论成功与否，只执行一次
+		if m.loadExistingSession(ctx) {
+			return nil
 		}
 	}
-	return false
-}
 
-// BeforeModel 在调用模型前注入记忆到系统提示
-func (m *MemoryMiddleware) BeforeModel(ctx context.Context, req *llm.ModelRequest) error {
-	if len(m.memories) == 0 {
+	// 3. 如果已有会话记录（非首次调用），跳过初始化
+	if m.sessionRecord != nil {
 		return nil
 	}
 
-	// 构建记忆内容
-	var memoryContent strings.Builder
-	memoryContent.WriteString("\n\n=== Agent 记忆 ===\n")
-
-	// 按类型组织记忆
-	systemMemories := m.GetMemoriesByType("system")
-	if len(systemMemories) > 0 {
-		memoryContent.WriteString("\n## 系统记忆\n")
-		for _, memory := range systemMemories {
-			memoryContent.WriteString(memory.Content)
-			memoryContent.WriteString("\n\n")
-		}
-	}
-
-	contextMemories := m.GetMemoriesByType("context")
-	if len(contextMemories) > 0 {
-		memoryContent.WriteString("\n## 上下文记忆\n")
-		for _, memory := range contextMemories {
-			memoryContent.WriteString(memory.Content)
-			memoryContent.WriteString("\n\n")
-		}
-	}
-
-	// 注入到系统提示
-	if req.SystemPrompt == "" {
-		req.SystemPrompt = memoryContent.String()
-	} else {
-		req.SystemPrompt += memoryContent.String()
+	// 4. 初始化新会话
+	m.sessionRecord = &SessionRecord{
+		SessionID:  m.sessionID,
+		StartTime:  time.Now().UTC().Format(time.RFC3339),
+		Iterations: make([]IterationLog, 0),
 	}
 
 	return nil
 }
 
-// BeforeAgent 在 Agent 开始前加载默认记忆
-func (m *MemoryMiddleware) BeforeAgent(ctx context.Context, state *agent.State) error {
-	// 尝试加载默认的 AGENTS.md 文件
-	defaultPaths := []string{
-		"AGENTS.md",
-		".agents/AGENTS.md",
-		"docs/AGENTS.md",
-	}
+// BeforeModel 在调用 LLM 前记录用户消息
+func (m *MemoryMiddleware) BeforeModel(ctx context.Context, req *llm.ModelRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	for _, path := range defaultPaths {
-		if _, err := os.Stat(path); err == nil {
-			// 检查是否已经加载过
-			alreadyLoaded := false
-			for _, memory := range m.memories {
-				if memory.Source == path {
-					alreadyLoaded = true
-					break
-				}
-			}
-
-			if !alreadyLoaded {
-				m.LoadFromFile(path)
+	// 1. 从 req.Messages 提取最后一条用户消息
+	var userMsg *MessageLog
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			userMsg = &MessageLog{
+				Role:      "user",
+				Content:   req.Messages[i].Content,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
 			}
 			break
 		}
 	}
 
+	// 2. 创建新的 IterationLog
+	m.currentIteration++
+	m.iterationLog = &IterationLog{
+		Iteration:   m.currentIteration,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		UserMessage: userMsg,
+	}
+
 	return nil
+}
+
+// AfterModel 在 LLM 响应后记录助手响应和工具调用
+func (m *MemoryMiddleware) AfterModel(ctx context.Context, resp *llm.ModelResponse, state *agent.State) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.iterationLog == nil {
+		return nil
+	}
+
+	// 1. 记录助手响应
+	assistantLog := &AssistantLog{
+		Content:    resp.Content,
+		StopReason: resp.StopReason,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		ToolCalls:  make([]ToolCallLog, 0),
+	}
+
+	// 2. 记录工具调用请求（此时工具还未执行）
+	for _, tc := range resp.ToolCalls {
+		toolCallLog := ToolCallLog{
+			ID:        tc.ID,
+			Name:      tc.Name,
+			Input:     tc.Input,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			// Output 和 IsError 将在 AfterTool 中填充
+		}
+		assistantLog.ToolCalls = append(assistantLog.ToolCalls, toolCallLog)
+	}
+
+	m.iterationLog.Assistant = assistantLog
+
+	// 3. 如果没有工具调用，立即持久化
+	if len(resp.ToolCalls) == 0 {
+		m.sessionRecord.Iterations = append(m.sessionRecord.Iterations, *m.iterationLog)
+		m.persistSession(ctx)
+		m.iterationLog = nil
+	}
+
+	return nil
+}
+
+// AfterTool 在工具执行后记录工具输出
+func (m *MemoryMiddleware) AfterTool(ctx context.Context, result *llm.ToolResult, state *agent.State) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.iterationLog == nil || m.iterationLog.Assistant == nil {
+		return nil
+	}
+
+	// 1. 查找对应的 ToolCallLog 并更新
+	for i := range m.iterationLog.Assistant.ToolCalls {
+		if m.iterationLog.Assistant.ToolCalls[i].ID == result.ToolCallID {
+			m.iterationLog.Assistant.ToolCalls[i].Output = result.Content
+			m.iterationLog.Assistant.ToolCalls[i].IsError = result.IsError
+			m.iterationLog.Assistant.ToolCalls[i].Timestamp = time.Now().UTC().Format(time.RFC3339)
+			break
+		}
+	}
+
+	// 2. 检查是否所有工具都已执行完毕
+	allToolsCompleted := true
+	for _, tc := range m.iterationLog.Assistant.ToolCalls {
+		if tc.Output == "" {
+			allToolsCompleted = false
+			break
+		}
+	}
+
+	// 3. 如果所有工具都执行完毕，持久化迭代记录
+	if allToolsCompleted {
+		m.sessionRecord.Iterations = append(m.sessionRecord.Iterations, *m.iterationLog)
+		m.persistSession(ctx)
+		m.iterationLog = nil
+	}
+
+	return nil
+}
+
+// persistSession 持久化会话记录到文件
+func (m *MemoryMiddleware) persistSession(ctx context.Context) error {
+	// 1. 更新 EndTime
+	m.sessionRecord.EndTime = time.Now().UTC().Format(time.RFC3339)
+
+	// 2. 序列化为 JSON
+	data, err := json.MarshalIndent(m.sessionRecord, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化会话记录失败: %w", err)
+	}
+
+	// 3. 生成文件路径：memory/sessions/YYYY-MM-DD/{session_id}.json
+	now := time.Now()
+	dateDir := now.Format("2006-01-02")
+	filePath := fmt.Sprintf("/memory/sessions/%s/%s.json", dateDir, m.sessionID)
+
+	// 4. 写入文件
+	_, err = m.backend.WriteFile(ctx, filePath, string(data))
+	if err != nil {
+		// 持久化失败不应导致 Agent 崩溃，记录错误但继续执行
+		return fmt.Errorf("写入会话记录失败: %w", err)
+	}
+
+	return nil
+}
+
+// loadExistingSession 尝试加载已有的会话记录
+// 返回 true 表示成功加载，false 表示未找到或加载失败
+func (m *MemoryMiddleware) loadExistingSession(ctx context.Context) bool {
+	// 尝试从最近 30 天的目录中查找会话文件
+	now := time.Now()
+	for i := 0; i < 30; i++ {
+		date := now.AddDate(0, 0, -i)
+		dateDir := date.Format("2006-01-02")
+		filePath := fmt.Sprintf("/memory/sessions/%s/%s.json", dateDir, m.sessionID)
+
+		content, err := m.backend.ReadFile(ctx, filePath, 0, 0)
+		if err != nil {
+			continue // 文件不存在，尝试下一个日期
+		}
+
+		var record SessionRecord
+		if err := json.Unmarshal([]byte(content), &record); err != nil {
+			continue // 解析失败，尝试下一个日期
+		}
+
+		// 成功加载
+		m.sessionRecord = &record
+		m.currentIteration = len(record.Iterations)
+		return true
+	}
+
+	return false // 未找到会话
+}
+
+// SetResumeMode 设置为恢复模式（由 REPL 调用）
+func (m *MemoryMiddleware) SetResumeMode(sessionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.sessionID = sessionID
+	m.resumeMode = true
+}
+
+// GetSessionInfo 获取会话元信息
+func (m *MemoryMiddleware) GetSessionInfo(ctx context.Context, sessionID, dateDir string) (*SessionInfo, error) {
+	filePath := fmt.Sprintf("/memory/sessions/%s/%s.json", dateDir, sessionID)
+
+	content, err := m.backend.ReadFile(ctx, filePath, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("读取会话文件失败: %w", err)
+	}
+
+	record, err := ParseSessionRecord(content)
+	if err != nil {
+		return nil, err
+	}
+
+	return record.ToSessionInfo(dateDir), nil
+}
+
+// LoadSessionMessages 加载会话的历史消息（用于恢复对话上下文）
+func (m *MemoryMiddleware) LoadSessionMessages(ctx context.Context) ([]llm.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 如果 sessionRecord 尚未加载，主动从文件加载
+	if m.sessionRecord == nil {
+		if m.sessionID == "" {
+			return nil, fmt.Errorf("会话 ID 未设置")
+		}
+		if !m.loadExistingSession(ctx) {
+			return nil, fmt.Errorf("未找到会话: %s", m.sessionID)
+		}
+	}
+
+	messages := make([]llm.Message, 0)
+
+	// 从 SessionRecord 重建消息列表
+	for _, iter := range m.sessionRecord.Iterations {
+		// 添加用户消息
+		if iter.UserMessage != nil {
+			messages = append(messages, llm.Message{
+				Role:    llm.RoleUser,
+				Content: iter.UserMessage.Content,
+			})
+		}
+
+		// 添加助手响应
+		if iter.Assistant != nil {
+			messages = append(messages, llm.Message{
+				Role:    llm.RoleAssistant,
+				Content: iter.Assistant.Content,
+			})
+		}
+	}
+
+	return messages, nil
 }

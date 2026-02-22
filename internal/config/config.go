@@ -32,9 +32,6 @@ type Config struct {
 	LogFile   string `yaml:"log_file" json:"log_file"`     // 日志文件路径，空表示输出到标准输出
 	LogFormat string `yaml:"log_format" json:"log_format"` // text, json
 
-	// 交互模式配置
-	Interactive bool `yaml:"interactive" json:"interactive"`
-
 	// 流式响应配置
 	EnableStreaming bool `yaml:"enable_streaming" json:"enable_streaming"` // 启用流式响应
 }
@@ -50,8 +47,6 @@ func DefaultConfig() *Config {
 		Temperature:      0.8,
 		LogLevel:         "info",
 		LogFormat:        "text",
-		Interactive:      false,
-		EnableStreaming:  true, // 默认启用流式
 	}
 }
 
@@ -91,6 +86,14 @@ func Load(path string) (*Config, error) {
 		}
 	default:
 		return nil, fmt.Errorf("不支持的配置文件格式: %s", ext)
+	}
+
+	// 环境变量覆盖配置文件（优先级最高）
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" && cfg.APIKey == "" {
+		cfg.APIKey = key
+	}
+	if url := os.Getenv("ANTHROPIC_BASE_URL"); url != "" && cfg.BaseUrl == "" {
+		cfg.BaseUrl = url
 	}
 
 	return cfg, nil
@@ -164,8 +167,6 @@ func (c *Config) Merge(other *Config) {
 	if other.LogFormat != "" {
 		c.LogFormat = other.LogFormat
 	}
-	// Interactive 是布尔值，直接使用 other 的值
-	c.Interactive = other.Interactive
 }
 
 // LoadSystemPrompt 加载系统提示词

@@ -263,7 +263,7 @@ func demo7AgentIntegration(apiKey, workDir string) {
 	}
 
 	// 创建 Agent
-	executor := agent.NewExecutor(agentConfig)
+	executor := agent.NewRunnable(agentConfig)
 
 	// 执行任务
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

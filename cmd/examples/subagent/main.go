@@ -85,7 +85,7 @@ func main() {
 	}
 
 	// 创建 Agent
-	executor := agent.NewExecutor(agentConfig)
+	executor := agent.NewRunnable(agentConfig)
 
 	// 示例 1: 简单任务（不需要子Agent）
 	fmt.Println("=== 示例 1: 简单任务 ===")

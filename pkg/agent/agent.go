@@ -76,4 +76,7 @@ type Middleware interface {
 
 	// AfterTool 在工具执行后调用
 	AfterTool(ctx context.Context, result *llm.ToolResult, state *State) error
+
+	// AfterAgent 在 Agent 执行前调用
+	AfterAgent(ctx context.Context, state *State) error
 }

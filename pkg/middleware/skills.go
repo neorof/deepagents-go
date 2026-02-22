@@ -4,216 +4,226 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
+	"path/filepath"
 	"strings"
 
 	"github.com/zhoucx/deepagents-go/pkg/agent"
 	"github.com/zhoucx/deepagents-go/pkg/llm"
+	"github.com/zhoucx/deepagents-go/pkg/tools"
+	"gopkg.in/yaml.v3"
 )
 
-// SkillsMiddleware 管理 Agent 的技能
+// SkillsMiddleware 管理 Agent 的技能（懒加载模式）
+// Skills 是可复用的指令、上下文和资源包，用于扩展 Agent 的领域知识
+// 在 system prompt 中声明轻量技能列表，模型通过 Skill 工具按需加载完整内容
 type SkillsMiddleware struct {
 	*BaseMiddleware
-	skills          []Skill
-	enabledSkills   map[string]bool     // 已启用的技能
-	disclosureMode  string              // 披露模式：all, progressive, manual
-	contextKeywords map[string][]string // 技能关键词映射
+	skills       []Skill
+	skillPaths   map[string]string // 技能名称 -> 技能目录路径
+	toolRegistry *tools.Registry
+	loadedSkills map[string]bool // 已加载完整内容的技能
 }
 
-// Skill 表示一个技能
+// Skill 表示一个技能（对齐 Claude Code 格式）
 type Skill struct {
-	Name          string   // 技能名称
-	Description   string   // 技能描述
-	UseCases      string   // 使用场景
-	Tools         []string // 可用工具
-	BestPractices string   // 最佳实践
-	Examples      string   // 示例
-	RelatedSkills []string // 相关技能
-	Keywords      []string // 关键词（用于渐进式披露）
-}
+	// YAML Frontmatter 字段
+	Name         string   `yaml:"name"`          // 技能标识符（小写，用连字符分隔）
+	Description  string   `yaml:"description"`   // 技能描述（说明做什么、何时使用）
+	AllowedTools []string `yaml:"allowed-tools"` // 允许使用的工具列表（可选）
 
-// SkillsConfig 技能配置
-type SkillsConfig struct {
-	DisclosureMode string // 披露模式：all（全部显示）, progressive（渐进式）, manual（手动）
+	// 解析后的内容
+	Content  string // SKILL.md 的 Markdown 正文（不含 frontmatter）
+	BasePath string // 技能目录路径（用于加载资源文件）
 }
 
 // NewSkillsMiddleware 创建技能中间件
-func NewSkillsMiddleware(config *SkillsConfig) *SkillsMiddleware {
-	if config == nil {
-		config = &SkillsConfig{
-			DisclosureMode: "progressive", // 默认渐进式披露
-		}
+func NewSkillsMiddleware(toolRegistry *tools.Registry) *SkillsMiddleware {
+	m := &SkillsMiddleware{
+		BaseMiddleware: NewBaseMiddleware("skills"),
+		skills:         make([]Skill, 0),
+		skillPaths:     make(map[string]string),
+		toolRegistry:   toolRegistry,
+		loadedSkills:   make(map[string]bool),
 	}
 
-	return &SkillsMiddleware{
-		BaseMiddleware:  NewBaseMiddleware("skills"),
-		skills:          make([]Skill, 0),
-		enabledSkills:   make(map[string]bool),
-		disclosureMode:  config.DisclosureMode,
-		contextKeywords: make(map[string][]string),
+	// 注册 Skill 工具
+	if toolRegistry != nil {
+		m.registerSkillTool()
 	}
+
+	return m
 }
 
-// LoadFromFile 从文件加载技能
-func (m *SkillsMiddleware) LoadFromFile(path string) error {
-	// 检查文件是否存在
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("技能文件不存在: %s", path)
+// registerSkillTool 注册 Skill 工具（对齐 Claude Code 的 Skill tool）
+func (m *SkillsMiddleware) registerSkillTool() {
+	m.toolRegistry.Register(tools.NewBaseTool(
+		"Skill",
+		m.buildSkillToolDescription(),
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"skill": map[string]any{
+					"type":        "string",
+					"description": "要激活的技能名称",
+				},
+			},
+			"required": []string{"skill"},
+		},
+		func(ctx context.Context, args map[string]any) (string, error) {
+			skillName, ok := args["skill"].(string)
+			if !ok {
+				return "", fmt.Errorf("skill must be a string")
+			}
+
+			skill := m.GetSkillByName(skillName)
+			if skill == nil {
+				var available strings.Builder
+				fmt.Fprintf(&available, "技能 '%s' 不存在。\n\n可用技能：\n", skillName)
+				for _, s := range m.skills {
+					fmt.Fprintf(&available, "- %s: %s\n", s.Name, s.Description)
+				}
+				return available.String(), nil
+			}
+
+			// 标记技能已加载
+			m.loadedSkills[skillName] = true
+
+			// 返回技能内容和基础路径
+			var result strings.Builder
+			fmt.Fprintf(&result, "Skill '%s' activated.\n", skill.Name)
+			fmt.Fprintf(&result, "Base path: %s\n\n", skill.BasePath)
+			result.WriteString(skill.Content)
+
+			return result.String(), nil
+		},
+	))
+}
+
+// buildSkillToolDescription 构建 Skill 工具的描述（包含可用技能列表）
+func (m *SkillsMiddleware) buildSkillToolDescription() string {
+	var desc strings.Builder
+	desc.WriteString(`激活一个技能，获取该技能的详细指令和领域知识。
+
+技能是可复用的指令包，包含：
+- 领域知识和最佳实践
+- 项目规范和工作流程
+- 模板和示例
+
+`)
+
+	if len(m.skills) > 0 {
+		desc.WriteString("<available_skills>\n")
+		for _, skill := range m.skills {
+			fmt.Fprintf(&desc, "- %s: %s\n", skill.Name, skill.Description)
+		}
+		desc.WriteString("</available_skills>\n")
 	}
 
-	// 读取文件内容
-	content, err := os.ReadFile(path)
+	return desc.String()
+}
+
+// LoadFromDirectory 从目录加载技能
+// 支持的目录结构：
+//
+//	skills/
+//	├── git-workflow/
+//	│   ├── SKILL.md
+//	│   └── templates/
+//	└── code-review/
+//	    └── SKILL.md
+func (m *SkillsMiddleware) LoadFromDirectory(dir string) error {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("读取技能文件失败: %w", err)
+		return fmt.Errorf("读取技能目录失败: %w", err)
 	}
 
-	// 解析技能
-	skills, err := m.parseSkills(string(content))
-	if err != nil {
-		return fmt.Errorf("解析技能失败: %w", err)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		skillDir := filepath.Join(dir, entry.Name())
+		skillFile := filepath.Join(skillDir, "SKILL.md")
+
+		if _, err := os.Stat(skillFile); os.IsNotExist(err) {
+			continue
+		}
+
+		skill, err := m.loadSkillFromFile(skillFile, skillDir)
+		if err != nil {
+			continue // 跳过无效的技能
+		}
+
+		m.skills = append(m.skills, *skill)
+		m.skillPaths[skill.Name] = skillDir
 	}
 
-	m.skills = skills
-
-	// 构建关键词映射
-	m.buildKeywordMap()
+	// 更新工具描述
+	if m.toolRegistry != nil {
+		m.toolRegistry.Remove("Skill")
+		m.registerSkillTool()
+	}
 
 	return nil
 }
 
-// parseSkills 解析技能内容
-func (m *SkillsMiddleware) parseSkills(content string) ([]Skill, error) {
-	skills := make([]Skill, 0)
-
-	// 使用正则表达式匹配技能块
-	// 匹配 "## Skill: [技能名称]" 开始的块
-	skillPattern := regexp.MustCompile(`(?m)^## Skill: (.+?)$`)
-	matches := skillPattern.FindAllStringSubmatchIndex(content, -1)
-
-	if len(matches) == 0 {
-		return skills, nil
+// loadSkillFromFile 从文件加载单个技能
+func (m *SkillsMiddleware) loadSkillFromFile(filePath, basePath string) (*Skill, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取技能文件失败: %w", err)
 	}
 
-	for i, match := range matches {
-		// 提取技能名称
-		nameStart := match[2]
-		nameEnd := match[3]
-		name := strings.TrimSpace(content[nameStart:nameEnd])
-
-		// 提取技能内容（从当前技能到下一个技能或文件末尾）
-		contentStart := match[1]
-		contentEnd := len(content)
-		if i < len(matches)-1 {
-			contentEnd = matches[i+1][0]
-		}
-
-		skillContent := content[contentStart:contentEnd]
-
-		// 解析技能字段
-		skill := Skill{
-			Name:          name,
-			Description:   m.extractField(skillContent, "描述"),
-			UseCases:      m.extractField(skillContent, "使用场景"),
-			BestPractices: m.extractField(skillContent, "最佳实践"),
-			Examples:      m.extractField(skillContent, "示例"),
-			Tools:         m.extractTools(skillContent),
-			RelatedSkills: m.extractRelatedSkills(skillContent),
-			Keywords:      m.extractKeywords(name, skillContent),
-		}
-
-		skills = append(skills, skill)
-	}
-
-	return skills, nil
+	return m.parseSkill(string(content), basePath)
 }
 
-// extractField 提取字段内容
-func (m *SkillsMiddleware) extractField(content, fieldName string) string {
-	pattern := regexp.MustCompile(fmt.Sprintf(`(?m)\*\*%s\*\*:\s*\n?(.*?)(?:\n\n|\*\*|$)`, fieldName))
-	matches := pattern.FindStringSubmatch(content)
-	if len(matches) > 1 {
-		return strings.TrimSpace(matches[1])
+// parseSkill 解析技能内容（YAML frontmatter + Markdown body）
+func (m *SkillsMiddleware) parseSkill(content, basePath string) (*Skill, error) {
+	// 检查是否有 YAML frontmatter
+	if !strings.HasPrefix(content, "---") {
+		return nil, fmt.Errorf("技能文件缺少 YAML frontmatter")
 	}
-	return ""
+
+	// 分离 frontmatter 和 body
+	parts := strings.SplitN(content[3:], "---", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("技能文件格式错误：缺少 frontmatter 结束标记")
+	}
+
+	frontmatter := strings.TrimSpace(parts[0])
+	body := strings.TrimSpace(parts[1])
+
+	// 解析 YAML frontmatter
+	var skill Skill
+	if err := yaml.Unmarshal([]byte(frontmatter), &skill); err != nil {
+		return nil, fmt.Errorf("解析 frontmatter 失败: %w", err)
+	}
+
+	// 验证必需字段
+	if skill.Name == "" {
+		return nil, fmt.Errorf("技能缺少 name 字段")
+	}
+	if skill.Description == "" {
+		return nil, fmt.Errorf("技能缺少 description 字段")
+	}
+
+	skill.Content = body
+	skill.BasePath = basePath
+
+	return &skill, nil
 }
 
-// extractTools 提取工具列表
-func (m *SkillsMiddleware) extractTools(content string) []string {
-	tools := make([]string, 0)
-	pattern := regexp.MustCompile("`([a-z_]+)`")
-	matches := pattern.FindAllStringSubmatch(content, -1)
-
-	seen := make(map[string]bool)
-	for _, match := range matches {
-		if len(match) > 1 {
-			tool := match[1]
-			// 只保留看起来像工具名的（包含下划线或全小写）
-			if strings.Contains(tool, "_") || tool == strings.ToLower(tool) {
-				if !seen[tool] {
-					tools = append(tools, tool)
-					seen[tool] = true
-				}
-			}
-		}
-	}
-	return tools
-}
-
-// extractRelatedSkills 提取相关技能
-func (m *SkillsMiddleware) extractRelatedSkills(content string) []string {
-	pattern := regexp.MustCompile(`(?m)\*\*相关技能\*\*:\s*(.+)`)
-	matches := pattern.FindStringSubmatch(content)
-	if len(matches) > 1 {
-		skillsStr := matches[1]
-		skills := strings.Split(skillsStr, "、")
-		result := make([]string, 0, len(skills))
-		for _, skill := range skills {
-			result = append(result, strings.TrimSpace(skill))
-		}
-		return result
-	}
-	return []string{}
-}
-
-// extractKeywords 提取关键词
-func (m *SkillsMiddleware) extractKeywords(name, content string) []string {
-	keywords := make([]string, 0)
-
-	// 从技能名称提取关键词
-	keywords = append(keywords, strings.ToLower(name))
-
-	// 从描述和使用场景提取关键词
-	description := m.extractField(content, "描述")
-	useCases := m.extractField(content, "使用场景")
-
-	text := description + " " + useCases
-	text = strings.ToLower(text)
-
-	// 提取常见关键词
-	commonKeywords := []string{
-		"文件", "搜索", "任务", "代码", "测试", "文档",
-		"读取", "写入", "编辑", "查找", "创建", "修改",
-		"file", "search", "task", "code", "test", "doc",
-		"read", "write", "edit", "find", "create", "modify",
+// AddSkill 添加技能
+func (m *SkillsMiddleware) AddSkill(skill Skill) {
+	m.skills = append(m.skills, skill)
+	if skill.BasePath != "" {
+		m.skillPaths[skill.Name] = skill.BasePath
 	}
 
-	for _, keyword := range commonKeywords {
-		if strings.Contains(text, keyword) {
-			keywords = append(keywords, keyword)
-		}
-	}
-
-	return keywords
-}
-
-// buildKeywordMap 构建关键词映射
-func (m *SkillsMiddleware) buildKeywordMap() {
-	m.contextKeywords = make(map[string][]string)
-
-	for _, skill := range m.skills {
-		for _, keyword := range skill.Keywords {
-			m.contextKeywords[keyword] = append(m.contextKeywords[keyword], skill.Name)
-		}
+	// 更新工具描述
+	if m.toolRegistry != nil {
+		m.toolRegistry.Remove("Skill")
+		m.registerSkillTool()
 	}
 }
 
@@ -224,166 +234,55 @@ func (m *SkillsMiddleware) GetSkills() []Skill {
 
 // GetSkillByName 根据名称获取技能
 func (m *SkillsMiddleware) GetSkillByName(name string) *Skill {
-	for _, skill := range m.skills {
-		if skill.Name == name {
-			return &skill
+	for i := range m.skills {
+		if m.skills[i].Name == name {
+			return &m.skills[i]
 		}
 	}
 	return nil
 }
 
-// EnableSkill 启用技能
-func (m *SkillsMiddleware) EnableSkill(name string) {
-	m.enabledSkills[name] = true
-}
-
-// DisableSkill 禁用技能
-func (m *SkillsMiddleware) DisableSkill(name string) {
-	delete(m.enabledSkills, name)
-}
-
-// IsSkillEnabled 检查技能是否启用
-func (m *SkillsMiddleware) IsSkillEnabled(name string) bool {
-	return m.enabledSkills[name]
-}
-
-// SetDisclosureMode 设置披露模式
-func (m *SkillsMiddleware) SetDisclosureMode(mode string) {
-	m.disclosureMode = mode
-}
-
-// GetDisclosureMode 获取披露模式
-func (m *SkillsMiddleware) GetDisclosureMode() string {
-	return m.disclosureMode
+// IsSkillLoaded 检查技能是否已加载完整内容
+func (m *SkillsMiddleware) IsSkillLoaded(name string) bool {
+	return m.loadedSkills[name]
 }
 
 // BeforeAgent 在 Agent 开始前加载默认技能
 func (m *SkillsMiddleware) BeforeAgent(ctx context.Context, state *agent.State) error {
-	// 尝试加载默认的 SKILLS.md 文件
-	defaultPaths := []string{
-		"SKILLS.md",
-		".skills/SKILLS.md",
-		"docs/SKILLS.md",
+	// 按优先级加载技能目录
+	// 1. 项目级技能（最高优先级）
+	// 2. 用户级技能
+	skillDirs := []string{
+		"skills",
 	}
 
-	for _, path := range defaultPaths {
-		if _, err := os.Stat(path); err == nil {
-			if len(m.skills) == 0 {
-				m.LoadFromFile(path)
-			}
-			break
+	for _, dir := range skillDirs {
+		if _, err := os.Stat(dir); err == nil {
+			m.LoadFromDirectory(dir)
 		}
 	}
 
 	return nil
 }
 
-// BeforeModel 在调用模型前注入技能到系统提示
+// BeforeModel 在调用模型前注入轻量技能列表到系统提示
 func (m *SkillsMiddleware) BeforeModel(ctx context.Context, req *llm.ModelRequest) error {
 	if len(m.skills) == 0 {
 		return nil
 	}
 
-	// 根据披露模式决定显示哪些技能
-	var skillsToShow []Skill
+	// 构建轻量技能列表（只有名称和简短描述）
+	var skillsList strings.Builder
+	skillsList.WriteString("\n\n## 可用技能\n\n")
+	skillsList.WriteString("以下技能可通过 `Skill` 工具激活，获取详细指令和领域知识：\n\n")
 
-	switch m.disclosureMode {
-	case "all":
-		// 显示所有技能
-		skillsToShow = m.skills
-	case "progressive":
-		// 渐进式披露：根据上下文关键词显示相关技能
-		skillsToShow = m.getRelevantSkills(req.Messages)
-	case "manual":
-		// 手动模式：只显示已启用的技能
-		for _, skill := range m.skills {
-			if m.IsSkillEnabled(skill.Name) {
-				skillsToShow = append(skillsToShow, skill)
-			}
-		}
-	default:
-		// 默认显示所有技能
-		skillsToShow = m.skills
+	for _, skill := range m.skills {
+		fmt.Fprintf(&skillsList, "- **%s**: %s\n", skill.Name, skill.Description)
 	}
 
-	if len(skillsToShow) == 0 {
-		return nil
-	}
+	skillsList.WriteString("\n当任务需要特定领域知识时，调用 `Skill` 工具激活相应技能。\n")
 
-	// 构建技能内容
-	var skillsContent strings.Builder
-	skillsContent.WriteString("\n\n=== 可用技能 ===\n")
-
-	for _, skill := range skillsToShow {
-		skillsContent.WriteString(fmt.Sprintf("\n## %s\n", skill.Name))
-
-		if skill.Description != "" {
-			skillsContent.WriteString(fmt.Sprintf("**描述**: %s\n", skill.Description))
-		}
-
-		if len(skill.Tools) > 0 {
-			skillsContent.WriteString(fmt.Sprintf("**工具**: %s\n", strings.Join(skill.Tools, ", ")))
-		}
-
-		if skill.BestPractices != "" {
-			skillsContent.WriteString(fmt.Sprintf("**最佳实践**: %s\n", skill.BestPractices))
-		}
-
-		skillsContent.WriteString("\n")
-	}
-
-	// 注入到系统提示
-	if req.SystemPrompt == "" {
-		req.SystemPrompt = skillsContent.String()
-	} else {
-		req.SystemPrompt += skillsContent.String()
-	}
+	req.SystemPrompt += skillsList.String()
 
 	return nil
-}
-
-// getRelevantSkills 根据上下文获取相关技能
-func (m *SkillsMiddleware) getRelevantSkills(messages []llm.Message) []Skill {
-	// 提取最近几条消息的内容
-	recentMessages := messages
-	if len(messages) > 5 {
-		recentMessages = messages[len(messages)-5:]
-	}
-
-	// 构建上下文文本
-	var contextText strings.Builder
-	for _, msg := range recentMessages {
-		contextText.WriteString(strings.ToLower(msg.Content))
-		contextText.WriteString(" ")
-	}
-	context := contextText.String()
-
-	// 查找匹配的技能
-	relevantSkills := make(map[string]bool)
-	for keyword, skillNames := range m.contextKeywords {
-		if strings.Contains(context, keyword) {
-			for _, skillName := range skillNames {
-				relevantSkills[skillName] = true
-			}
-		}
-	}
-
-	// 如果没有匹配的技能，返回前3个技能作为默认
-	if len(relevantSkills) == 0 {
-		maxSkills := 3
-		if len(m.skills) < maxSkills {
-			maxSkills = len(m.skills)
-		}
-		return m.skills[:maxSkills]
-	}
-
-	// 返回相关技能
-	result := make([]Skill, 0)
-	for _, skill := range m.skills {
-		if relevantSkills[skill.Name] {
-			result = append(result, skill)
-		}
-	}
-
-	return result
 }

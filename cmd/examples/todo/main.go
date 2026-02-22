@@ -68,7 +68,7 @@ func main() {
 	}
 
 	// 创建 Agent
-	executor := agent.NewExecutor(config)
+	executor := agent.NewRunnable(config)
 
 	// 执行示例任务
 	ctx := context.Background()
@@ -109,7 +109,7 @@ func main() {
 
 	// 读取最终的 Todo 列表
 	fmt.Println("\n=== 最终 Todo 列表 ===")
-	todoContent, err := fsBackend.ReadFile(ctx, "/todos.md", 0, 0)
+	todoContent, err := fsBackend.ReadFile(ctx, "todos.md", 0, 0)
 	if err == nil {
 		fmt.Println(todoContent)
 	}

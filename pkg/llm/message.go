@@ -11,8 +11,10 @@ const (
 
 // Message 表示一条对话消息
 type Message struct {
-	Role    Role   `json:"role"`
-	Content string `json:"content"`
+	Role        Role         `json:"role"`
+	Content     string       `json:"content"`
+	ToolCalls   []ToolCall   `json:"tool_calls,omitempty"`   // assistant 消息中的工具调用
+	ToolResults []ToolResult `json:"tool_results,omitempty"` // user 消息中的工具结果
 }
 
 // ToolCall 表示工具调用请求
